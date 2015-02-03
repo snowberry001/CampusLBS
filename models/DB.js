@@ -1,12 +1,8 @@
  
  var config = require('../config');
- var mysql = require('mysql');
  
- var connection = mysql.createConnection({
- 	database: config.database,
- 	host: config.host,
- 	user: config.user,
- 	password: config.password
- });
+ var Db = require('mongodb').Db;
+ var Connection = require('mongodb').Connection;
+ var Server = require('mongodb').Server;
 
- module.exports = connection;
+ module.exports = new Db(config.database, new Server(config.host, Connection.DEFAULT_PORT, {}));

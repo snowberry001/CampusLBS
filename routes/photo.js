@@ -5,97 +5,69 @@ var fs = require('fs');
 var express = require('express');
 var router = express.Router();
 var formidable = require('formidable'); 
+var UUID = require('uuid-js');
 
 var mime = require('./mime').mime;
 var Photo = require('../models/Photo');
 
-/* 根据照片id获取照片 */
-router.get('/:filename', function(req, res){
-	
-    // 参数校验
-	var filename = req.params.filename;
-    var result = filename.split('.');
-    if (result.length != 2) {
-        res.status(404).end();
-        return;         
-    }
-  	var photo_id = Number(result[0]);
-    var photo_type = result[1];
-	var content_type = mime[photo_type];
-    if (isNaN(photo_id) || !content_type) {
-        res.status(404).end();
-        return;
-    }
 
-    var filePath = path.join(process.app.get('rootDir'), 'upload', filename);
 
-    fs.exists(filePath, function (exists) {
-        if(exists){
-            res.set({'Content-Type': content_type});
-            res.sendFile(filePath);    
-        }else {
-            res.status(404).end();
-            return;
-        }   	
-    });
+/*
+* 推荐附近图片
+* 返回更多详细信息
+* result中dis以m为单位
+*/
+router.get('/find', function(req, res){
+    var location = req.query.accurateLocation;
+    var locArr = location.split(',');
+    var latitude = Number(locArr[0]);
+    var longitude = Number(locArr[1]);
 
-});
-
-// 上传照片
-router.post('/share', function(req, res){
-
-    // 处理数据库记录插入
-    var photo_id = req.body.photo_id;
-    var tour_id = req.body.tour_id;
-    var photo_desc = req.body.photo_desc;
-    var location = req.body.location;
-    var date = req.body.date; 
-
-    var photo = new Photo(photo_id, tour_id, photo_desc, location, date);
-    Photo.save(photo, function(err, result) {
+    var options = {};
+    options.longitude = longitude;
+    options.latitude = latitude;
+    
+    Photo.queryWithDistance(options, function(err, result) {
         if (err) {
             console.log(err);
             res.send({err: err});
-            //res.status(500).end();
         } else {
-            var insertId = result.insertId;
-            var options = {tour_id: 222,photo_id: 111};
-            Photo.query(options, function(err, rows) {
-                if (err) {
-                    res.send({err: err});
-                } else {
-                    res.send({rows: rows});
-                }
-            });
-            //res.send({result: result});
+            console.log(result);
+            res.send(result);
         }
     });
-    
 });
 
+
+
 /* 处理数据库记录插入 */
-var createShareRecord = function(fields, res){
+var insertAndPushSharePhoto = function(fields, res){
 
-    var photo_id = fields['photo_id'];
-    var tour_id = fields['tour_id'];
+    var photo_new_url = fields['photo_new_url'];
+    var photo_origin_url = fields['photo_origin_url'];
     var photo_desc = fields['photo_desc'];
-    var location = fields['location'];
-    var date = fields['date']; 
+    var create_date = fields['create_date']; 
+    var locArr = fields['accurate_location'].split(',');
+    var latitude = Number(locArr[0]);
+    var longitude = Number(locArr[1]);
+    var location_text = fields["location_text"];
 
-    var photo = new Photo(photo_id, tour_id, photo_desc, location, date);
+    var photo = new Photo(photo_new_url, photo_origin_url, photo_desc, latitude, longitude, location_text, create_date);
     Photo.save(photo, function(err, result) {
         if (err) {
             console.log(err);
             res.send({err: err});
-            //res.status(500).end();
         } else {
-            var insertId = result.insertId;
-            var options = {tour_id: 222,photo_id: 111};
-            Photo.query(options, function(err, rows) {
+            console.log(result[0].photo_new_url);
+
+            var options = {latitude: latitude, longitude: longitude};
+            Photo.queryWithDistance(options, function(err, photos){
                 if (err) {
+                    console.log(err);
                     res.send({err: err});
                 } else {
-                    res.send({rows: rows});
+                    console.log(photos);
+                    res.send(photos);
                 }
             });
         }
@@ -104,23 +76,18 @@ var createShareRecord = function(fields, res){
 };
 
 /* 图片重命名 */
-var renamePhoto = function(fields, photo) {
-    var tour_id = fields.tour_id;
-    var photo_id = fields.photo_id;
-    var ext = photo.name.split('.')[1];
-    var current_folder = path.join('upload' ,tour_id + '');
+var renamePhoto = function(photo) {
 
-    if(!fs.existsSync(current_folder)){
-        fs.mkdirSync(current_folder);
-    }
-
-    fs.renameSync(photo.path, current_folder + '/' + photo_id + '.' + ext);    
+    var new_photo_name = UUID.create().toString() + '.png';
+    //var ext = photo.name.split('.')[1];
+    fs.renameSync(photo.path, 'upload/' + new_photo_name);    
+    return new_photo_name;
 };
 
 /* 图片分享 */
 router.post('/upload', function(req, res){
 
-    // 保证临时文件夹存在
+    // 保证图片文件夹存在
     var upload_folder = path.join(process.app.get('rootDir'), 'upload');
     if(!fs.existsSync(upload_folder)){
         fs.mkdirSync(upload_folder);
@@ -156,9 +123,13 @@ router.post('/upload', function(req, res){
         console.log(files);
         console.log(fields);
         // 图片重命名
-        renamePhoto(fields, files.file1);
-        // 数据库插入分享记录
-        createShareRecord(fields, res);
+        var photo_new_name = renamePhoto(files.shareImage);
+        fields["photo_new_url"] = photo_new_name;
+        
+        /* 1、数据库插入分享记录 
+         * 2、推送附近图片
+        */
+        insertAndPushSharePhoto(fields, res);
     });
 
     form.on('err', function(err){
@@ -167,6 +138,104 @@ router.post('/upload', function(req, res){
     });
 
     form.parse(req);
+});
+
+
+/*
+* 推荐附近图片
+* 不返回dis，只返回document
+*/
+router.post('/recommend1', function(req, res){
+	var location = req.body.accurateLocation;
+	var locArr = location.split(',');
+	var latitude = Number(locArr[0]);
+	var longitude = Number(locArr[1]);
+
+    var dis = Number(req.body.maxDistance) || 1000;
+
+    /*GeoJson格式查询单位为米
+      如果单位为弧度：km除以6371
+    */
+    var query = {'location': {$geoNear:                     
+                   {$geometry:
+                        { type: "Point" ,
+                          coordinates : [longitude, latitude] } } ,
+                   $maxDistance : dis}
+                };
+    console.log(query);
+    var options = {};
+    options.query = query;
+    options.limit_num = 2;
+	Photo.query(options, function(err, result) {
+        if (err) {
+            console.log(err);
+            res.send({err: err});
+        } else {
+            console.log(result);
+			res.send({result: result});
+        }
+    });
+});
+
+
+/*
+* 推荐附近图片
+* 返回更多详细信息
+* result中dis以m为单位
+*/
+router.post('/recommend', function(req, res){
+    var location = req.body.accurateLocation;
+    var locArr = location.split(',');
+    var latitude = Number(locArr[0]);
+    var longitude = Number(locArr[1]);
+    var maxDistance = Number(req.body.maxDistance);
+
+    var options = {};
+    options.longitude = longitude;
+    options.latitude = latitude;
+    options.maxDistance = maxDistance;
+    
+    Photo.queryWithDistance(options, function(err, result) {
+        if (err) {
+            console.log(err);
+            res.send({err: err});
+        } else {
+            console.log(result);
+            res.send({result: result});
+        }
+    });
+});
+
+/* 根据照片id获取照片 */
+router.get('/name/:filename', function(req, res){
+    
+    // 参数校验
+    var filename = req.params.filename;
+    var result = filename.split('.');
+    if (result.length != 2) {
+        res.status(404).end();
+        return;         
+    }
+    var photo_id = result[0];
+    var photo_type = result[1];
+    var content_type = mime[photo_type];
+    if (!content_type) {
+        res.status(404).end();
+        return;
+    }
+
+    var filePath = path.join(process.app.get('rootDir'), 'upload', filename);
+
+    fs.exists(filePath, function (exists) {
+        if(exists){
+            res.set({'Content-Type': content_type});
+            res.sendFile(filePath);    
+        }else {
+            res.status(404).end();
+            return;
+        }       
+    });
+
 });
 
 module.exports = router;
